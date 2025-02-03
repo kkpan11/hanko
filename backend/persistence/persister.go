@@ -4,6 +4,7 @@ import (
 	"embed"
 	"github.com/gobuffalo/pop/v6"
 	"github.com/teamhanko/hanko/backend/config"
+	"time"
 )
 
 //go:embed migrations/*
@@ -15,34 +16,54 @@ type persister struct {
 }
 
 type Persister interface {
+	GetAuditLogPersister() AuditLogPersister
+	GetAuditLogPersisterWithConnection(tx *pop.Connection) AuditLogPersister
 	GetConnection() *pop.Connection
-	Transaction(func(tx *pop.Connection) error) error
+	GetFlowPersister() FlowPersister
+	GetFlowPersisterWithConnection(tx *pop.Connection) FlowPersister
+	GetEmailPersister() EmailPersister
+	GetEmailPersisterWithConnection(tx *pop.Connection) EmailPersister
 	GetIdentityPersister() IdentityPersister
 	GetIdentityPersisterWithConnection(tx *pop.Connection) IdentityPersister
-	GetUserPersister() UserPersister
-	GetUserPersisterWithConnection(tx *pop.Connection) UserPersister
+	GetJwkPersister() JwkPersister
+	GetJwkPersisterWithConnection(tx *pop.Connection) JwkPersister
 	GetPasscodePersister() PasscodePersister
 	GetPasscodePersisterWithConnection(tx *pop.Connection) PasscodePersister
 	GetPasswordCredentialPersister() PasswordCredentialPersister
 	GetPasswordCredentialPersisterWithConnection(tx *pop.Connection) PasswordCredentialPersister
+	GetPrimaryEmailPersister() PrimaryEmailPersister
+	GetPrimaryEmailPersisterWithConnection(tx *pop.Connection) PrimaryEmailPersister
+	GetSamlCertificatePersister() SamlCertificatePersister
+	GetSamlCertificatePersisterWithConnection(tx *pop.Connection) SamlCertificatePersister
+	GetSamlStatePersister() SamlStatePersister
+	GetSamlStatePersisterWithConnection(tx *pop.Connection) SamlStatePersister
+	GetSamlIdentityPersister() SamlIdentityPersister
+	GetSamlIdentityPersisterWithConnection(tx *pop.Connection) SamlIdentityPersister
+	GetTokenPersister() TokenPersister
+	GetTokenPersisterWithConnection(tx *pop.Connection) TokenPersister
+	GetUserPersister() UserPersister
+	GetUserPersisterWithConnection(tx *pop.Connection) UserPersister
 	GetWebauthnCredentialPersister() WebauthnCredentialPersister
 	GetWebauthnCredentialPersisterWithConnection(tx *pop.Connection) WebauthnCredentialPersister
 	GetWebauthnSessionDataPersister() WebauthnSessionDataPersister
 	GetWebauthnSessionDataPersisterWithConnection(tx *pop.Connection) WebauthnSessionDataPersister
-	GetJwkPersister() JwkPersister
-	GetJwkPersisterWithConnection(tx *pop.Connection) JwkPersister
-	GetAuditLogPersister() AuditLogPersister
-	GetAuditLogPersisterWithConnection(tx *pop.Connection) AuditLogPersister
-	GetEmailPersister() EmailPersister
-	GetEmailPersisterWithConnection(tx *pop.Connection) EmailPersister
-	GetPrimaryEmailPersister() PrimaryEmailPersister
-	GetPrimaryEmailPersisterWithConnection(tx *pop.Connection) PrimaryEmailPersister
-	GetTokenPersister() TokenPersister
-	GetTokenPersisterWithConnection(tx *pop.Connection) TokenPersister
-	GetSamlStatePersister() SamlStatePersister
-	GetSamlStatePersisterWithConnection(tx *pop.Connection) SamlStatePersister
-	GetSamlCertificatePersister() SamlCertificatePersister
-	GetSamlCertificatePersisterWithConnection(tx *pop.Connection) SamlCertificatePersister
+	GetWebhookPersister(tx *pop.Connection) WebhookPersister
+	GetTrustedDevicePersister() TrustedDevicePersister
+	GetTrustedDevicePersisterWithConnection(tx *pop.Connection) TrustedDevicePersister
+	GetUsernamePersister() UsernamePersister
+	GetUsernamePersisterWithConnection(tx *pop.Connection) UsernamePersister
+	GetSessionPersister() SessionPersister
+	GetSessionPersisterWithConnection(tx *pop.Connection) SessionPersister
+	GetOTPSecretPersister() OTPSecretPersister
+	GetOTPSecretPersisterWithConnection(tx *pop.Connection) OTPSecretPersister
+	GetWebauthnCredentialUserHandlePersister() WebauthnCredentialUserHandlePersister
+	GetWebauthnCredentialUserHandlePersisterWithConnection(tx *pop.Connection) WebauthnCredentialUserHandlePersister
+	Transaction(func(tx *pop.Connection) error) error
+}
+
+type Cleanup[T any] interface {
+	FindExpired(cutoffTime time.Time, page, perPage int) ([]T, error)
+	Delete(item T) error
 }
 
 type Migrator interface {
@@ -58,8 +79,10 @@ type Storage interface {
 // New return a new Persister Object with given configuration
 func New(config config.Database) (Storage, error) {
 	connectionDetails := &pop.ConnectionDetails{
-		Pool:     5,
-		IdlePool: 0,
+		Pool:            5,
+		IdlePool:        0,
+		ConnMaxIdleTime: 5 * time.Minute,
+		ConnMaxLifetime: 1 * time.Hour,
 	}
 	if len(config.Url) > 0 {
 		connectionDetails.URL = config.Url
@@ -117,6 +140,14 @@ func (p *persister) GetConnection() *pop.Connection {
 	return p.DB
 }
 
+func (p *persister) GetFlowPersister() FlowPersister {
+	return NewFlowPersister(p.DB)
+}
+
+func (p *persister) GetFlowPersisterWithConnection(tx *pop.Connection) FlowPersister {
+	return NewFlowPersister(tx)
+}
+
 func (p *persister) GetIdentityPersister() IdentityPersister {
 	return NewIdentityPersister(p.DB)
 }
@@ -147,6 +178,30 @@ func (p *persister) GetPasswordCredentialPersister() PasswordCredentialPersister
 
 func (p *persister) GetPasswordCredentialPersisterWithConnection(tx *pop.Connection) PasswordCredentialPersister {
 	return NewPasswordCredentialPersister(tx)
+}
+
+func (p *persister) GetTrustedDevicePersister() TrustedDevicePersister {
+	return NewTrustedDevicePersister(p.DB)
+}
+
+func (p *persister) GetTrustedDevicePersisterWithConnection(tx *pop.Connection) TrustedDevicePersister {
+	return NewTrustedDevicePersister(tx)
+}
+
+func (p *persister) GetUsernamePersister() UsernamePersister {
+	return NewUsernamePersister(p.DB)
+}
+
+func (p *persister) GetUsernamePersisterWithConnection(tx *pop.Connection) UsernamePersister {
+	return NewUsernamePersister(tx)
+}
+
+func (p *persister) GetOTPSecretPersister() OTPSecretPersister {
+	return NewOTPSecretPersister(p.DB)
+}
+
+func (p *persister) GetOTPSecretPersisterWithConnection(tx *pop.Connection) OTPSecretPersister {
+	return NewOTPSecretPersister(tx)
 }
 
 func (p *persister) GetWebauthnCredentialPersister() WebauthnCredentialPersister {
@@ -223,4 +278,36 @@ func (p *persister) GetSamlCertificatePersister() SamlCertificatePersister {
 
 func (p *persister) GetSamlCertificatePersisterWithConnection(tx *pop.Connection) SamlCertificatePersister {
 	return NewSamlCertificatePersister(tx)
+}
+
+func (p *persister) GetSamlIdentityPersister() SamlIdentityPersister {
+	return NewSamlIdentityPersister(p.DB)
+}
+
+func (p *persister) GetSamlIdentityPersisterWithConnection(tx *pop.Connection) SamlIdentityPersister {
+	return NewSamlIdentityPersister(tx)
+}
+
+func (p *persister) GetWebhookPersister(tx *pop.Connection) WebhookPersister {
+	if tx != nil {
+		return NewWebhookPersister(tx)
+	}
+
+	return NewWebhookPersister(p.DB)
+}
+
+func (p *persister) GetSessionPersister() SessionPersister {
+	return NewSessionPersister(p.DB)
+}
+
+func (p *persister) GetSessionPersisterWithConnection(tx *pop.Connection) SessionPersister {
+	return NewSessionPersister(tx)
+}
+
+func (p *persister) GetWebauthnCredentialUserHandlePersister() WebauthnCredentialUserHandlePersister {
+	return NewWebauthnCredentialUserHandlePersister(p.DB)
+}
+
+func (p *persister) GetWebauthnCredentialUserHandlePersisterWithConnection(tx *pop.Connection) WebauthnCredentialUserHandlePersister {
+	return NewWebauthnCredentialUserHandlePersister(tx)
 }

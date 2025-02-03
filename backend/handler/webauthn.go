@@ -14,6 +14,7 @@ import (
 	"github.com/teamhanko/hanko/backend/config"
 	"github.com/teamhanko/hanko/backend/dto"
 	"github.com/teamhanko/hanko/backend/dto/intern"
+	"github.com/teamhanko/hanko/backend/mapper"
 	"github.com/teamhanko/hanko/backend/persistence"
 	"github.com/teamhanko/hanko/backend/persistence/models"
 	"github.com/teamhanko/hanko/backend/session"
@@ -23,21 +24,33 @@ import (
 )
 
 type WebauthnHandler struct {
-	persister      persistence.Persister
-	webauthn       *webauthn.WebAuthn
-	sessionManager session.Manager
-	cfg            *config.Config
-	auditLogger    auditlog.Logger
+	persister             persistence.Persister
+	webauthn              *webauthn.WebAuthn
+	sessionManager        session.Manager
+	cfg                   *config.Config
+	auditLogger           auditlog.Logger
+	authenticatorMetadata mapper.AuthenticatorMetadata
 }
 
+const (
+	GetUserFailureMessage               = "failed to get user: %w"
+	CastSessionFailureMessage           = "failed to cast session object"
+	CreateAuditLogFailureMessage        = "failed to create audit log: %w"
+	UserNotFoundMessage                 = "user not found"
+	SubjectParseFailureMessage          = "failed to parse subject as uuid: %w"
+	GetWebauthnCredentialFailureMessage = "failed to get webauthn credentials: %w"
+	StoredChallengeMismatchMessage      = "Stored challenge and received challenge do not match"
+	UnknownUserMessage                  = "unknown user"
+)
+
 // NewWebauthnHandler creates a new handler which handles all webauthn related routes
-func NewWebauthnHandler(cfg *config.Config, persister persistence.Persister, sessionManager session.Manager, auditLogger auditlog.Logger) (*WebauthnHandler, error) {
+func NewWebauthnHandler(cfg *config.Config, persister persistence.Persister, sessionManager session.Manager, auditLogger auditlog.Logger, authenticatorMetadata mapper.AuthenticatorMetadata) (*WebauthnHandler, error) {
 	f := false
 	wa, err := webauthn.New(&webauthn.Config{
 		RPDisplayName:         cfg.Webauthn.RelyingParty.DisplayName,
 		RPID:                  cfg.Webauthn.RelyingParty.Id,
 		RPOrigins:             cfg.Webauthn.RelyingParty.Origins,
-		AttestationPreference: protocol.PreferNoAttestation,
+		AttestationPreference: protocol.PreferDirectAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			RequireResidentKey: &f,
 			ResidentKey:        protocol.ResidentKeyRequirementDiscouraged,
@@ -46,11 +59,11 @@ func NewWebauthnHandler(cfg *config.Config, persister persistence.Persister, ses
 		Debug: false,
 		Timeouts: webauthn.TimeoutsConfig{
 			Login: webauthn.TimeoutConfig{
-				Timeout: time.Duration(cfg.Webauthn.Timeout) * time.Millisecond,
+				Timeout: time.Duration(cfg.Webauthn.Timeouts.Login) * time.Millisecond,
 				Enforce: true,
 			},
 			Registration: webauthn.TimeoutConfig{
-				Timeout: time.Duration(cfg.Webauthn.Timeout) * time.Millisecond,
+				Timeout: time.Duration(cfg.Webauthn.Timeouts.Registration) * time.Millisecond,
 				Enforce: true,
 			},
 		},
@@ -61,11 +74,12 @@ func NewWebauthnHandler(cfg *config.Config, persister persistence.Persister, ses
 	}
 
 	return &WebauthnHandler{
-		persister:      persister,
-		webauthn:       wa,
-		sessionManager: sessionManager,
-		cfg:            cfg,
-		auditLogger:    auditLogger,
+		persister:             persister,
+		webauthn:              wa,
+		sessionManager:        sessionManager,
+		cfg:                   cfg,
+		auditLogger:           auditLogger,
+		authenticatorMetadata: authenticatorMetadata,
 	}, nil
 }
 
@@ -73,7 +87,7 @@ func NewWebauthnHandler(cfg *config.Config, persister persistence.Persister, ses
 func (h *WebauthnHandler) BeginRegistration(c echo.Context) error {
 	sessionToken, ok := c.Get("session").(jwt.Token)
 	if !ok {
-		return errors.New("failed to cast session object")
+		return errors.New(CastSessionFailureMessage)
 	}
 	uId, err := uuid.FromString(sessionToken.Subject())
 	if err != nil {
@@ -81,14 +95,14 @@ func (h *WebauthnHandler) BeginRegistration(c echo.Context) error {
 	}
 	webauthnUser, user, err := h.getWebauthnUser(h.persister.GetConnection(), uId)
 	if err != nil {
-		return fmt.Errorf("failed to get user: %w", err)
+		return fmt.Errorf(GetUserFailureMessage, err)
 	}
 	if webauthnUser == nil {
 		err = h.auditLogger.Create(c, models.AuditLogWebAuthnRegistrationInitFailed, nil, fmt.Errorf("unknown user"))
 		if err != nil {
-			return fmt.Errorf("failed to create audit log: %w", err)
+			return fmt.Errorf(CreateAuditLogFailureMessage, err)
 		}
-		return echo.NewHTTPError(http.StatusBadRequest, "user not found").SetInternal(errors.New(fmt.Sprintf("user %s not found ", uId)))
+		return echo.NewHTTPError(http.StatusBadRequest, UserNotFoundMessage).SetInternal(errors.New(fmt.Sprintf("user %s not found ", uId)))
 	}
 
 	t := true
@@ -97,9 +111,10 @@ func (h *WebauthnHandler) BeginRegistration(c echo.Context) error {
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			RequireResidentKey: &t,
 			ResidentKey:        protocol.ResidentKeyRequirementRequired,
-			UserVerification:   protocol.UserVerificationRequirement(h.cfg.Webauthn.UserVerification),
+			UserVerification:   protocol.UserVerificationRequirement(h.cfg.Passkey.UserVerification),
 		}),
-		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
+
+		webauthn.WithConveyancePreference(protocol.ConveyancePreference(h.cfg.Passkey.AttestationPreference)),
 		// don't set the excludeCredentials list, so an already registered device can be re-registered
 	)
 
@@ -114,7 +129,7 @@ func (h *WebauthnHandler) BeginRegistration(c echo.Context) error {
 
 	err = h.auditLogger.Create(c, models.AuditLogWebAuthnRegistrationInitSucceeded, user, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create audit log: %w", err)
+		return fmt.Errorf(CreateAuditLogFailureMessage, err)
 	}
 
 	return c.JSON(http.StatusOK, options)
@@ -125,7 +140,7 @@ func (h *WebauthnHandler) BeginRegistration(c echo.Context) error {
 func (h *WebauthnHandler) FinishRegistration(c echo.Context) error {
 	sessionToken, ok := c.Get("session").(jwt.Token)
 	if !ok {
-		return errors.New("failed to cast session object")
+		return errors.New(CastSessionFailureMessage)
 	}
 	request, err := protocol.ParseCredentialCreationResponse(c.Request())
 	if err != nil {
@@ -145,30 +160,30 @@ func (h *WebauthnHandler) FinishRegistration(c echo.Context) error {
 		if sessionData == nil {
 			err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnRegistrationFinalFailed, nil, fmt.Errorf("received unkown challenge"))
 			if err != nil {
-				return fmt.Errorf("failed to create audit log: %w", err)
+				return fmt.Errorf(CreateAuditLogFailureMessage, err)
 			}
-			return echo.NewHTTPError(http.StatusBadRequest, "Stored challenge and received challenge do not match").SetInternal(errors.New("sessionData not found"))
+			return echo.NewHTTPError(http.StatusBadRequest, StoredChallengeMismatchMessage).SetInternal(errors.New("sessionData not found"))
 		}
 
 		if sessionToken.Subject() != sessionData.UserId.String() {
 			err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnRegistrationFinalFailed, nil, fmt.Errorf("user session does not match sessionData subject"))
 			if err != nil {
-				return fmt.Errorf("failed to create audit log: %w", err)
+				return fmt.Errorf(CreateAuditLogFailureMessage, err)
 			}
-			return echo.NewHTTPError(http.StatusBadRequest, "Stored challenge and received challenge do not match").SetInternal(errors.New("userId in webauthn.sessionData does not match user session"))
+			return echo.NewHTTPError(http.StatusBadRequest, StoredChallengeMismatchMessage).SetInternal(errors.New("userId in webauthn.sessionData does not match user session"))
 		}
 
 		webauthnUser, user, err := h.getWebauthnUser(tx, sessionData.UserId)
 		if err != nil {
-			return fmt.Errorf("failed to get user: %w", err)
+			return fmt.Errorf(GetUserFailureMessage, err)
 		}
 
 		if webauthnUser == nil {
-			err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnRegistrationFinalFailed, nil, fmt.Errorf("unkown user"))
+			err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnRegistrationFinalFailed, nil, fmt.Errorf(UnknownUserMessage))
 			if err != nil {
-				return fmt.Errorf("failed to create audit log: %w", err)
+				return fmt.Errorf(CreateAuditLogFailureMessage, err)
 			}
-			return echo.NewHTTPError(http.StatusBadRequest).SetInternal(errors.New("user not found"))
+			return echo.NewHTTPError(http.StatusBadRequest).SetInternal(errors.New(UserNotFoundMessage))
 		}
 
 		credential, err := h.webauthn.CreateCredential(webauthnUser, *intern.WebauthnSessionDataFromModel(sessionData), request)
@@ -186,9 +201,9 @@ func (h *WebauthnHandler) FinishRegistration(c echo.Context) error {
 				errorMessage = fmt.Sprintf("%s: %s: %s", errorMessage, err.Details, err.DevInfo)
 				errorStatus = http.StatusUnprocessableEntity
 			}
-			err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnRegistrationFinalFailed, user, errors.New(errorMessage))
-			if err != nil {
-				return fmt.Errorf("failed to create audit log: %w", err)
+			aErr := h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnRegistrationFinalFailed, user, errors.New(errorMessage))
+			if aErr != nil {
+				return fmt.Errorf(CreateAuditLogFailureMessage, aErr)
 			}
 
 			return echo.NewHTTPError(errorStatus, errorMessage).SetInternal(err)
@@ -196,7 +211,7 @@ func (h *WebauthnHandler) FinishRegistration(c echo.Context) error {
 
 		backupEligible := request.Response.AttestationObject.AuthData.Flags.HasBackupEligible()
 		backupState := request.Response.AttestationObject.AuthData.Flags.HasBackupState()
-		model := intern.WebauthnCredentialToModel(credential, sessionData.UserId, backupEligible, backupState)
+		model := intern.WebauthnCredentialToModel(credential, sessionData.UserId, backupEligible, backupState, false, h.authenticatorMetadata)
 		err = h.persister.GetWebauthnCredentialPersisterWithConnection(tx).Create(*model)
 		if err != nil {
 			return fmt.Errorf("failed to store webauthn credential: %w", err)
@@ -209,7 +224,7 @@ func (h *WebauthnHandler) FinishRegistration(c echo.Context) error {
 
 		err = h.auditLogger.Create(c, models.AuditLogWebAuthnRegistrationFinalSucceeded, user, nil)
 		if err != nil {
-			return fmt.Errorf("failed to create audit log: %w", err)
+			return fmt.Errorf(CreateAuditLogFailureMessage, err)
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{"credential_id": model.ID, "user_id": webauthnUser.UserId.String()})
@@ -237,27 +252,27 @@ func (h *WebauthnHandler) BeginAuthentication(c echo.Context) error {
 		if err != nil {
 			err = h.auditLogger.Create(c, models.AuditLogWebAuthnAuthenticationInitFailed, nil, fmt.Errorf("user_id is not a uuid"))
 			if err != nil {
-				return fmt.Errorf("failed to create audit log: %w", err)
+				return fmt.Errorf(CreateAuditLogFailureMessage, err)
 			}
 			return echo.NewHTTPError(http.StatusBadRequest, "failed to parse UserID as uuid").SetInternal(err)
 		}
 		var webauthnUser *intern.WebauthnUser
-		webauthnUser, user, err = h.getWebauthnUser(h.persister.GetConnection(), userId) // TODO:
+		webauthnUser, user, err = h.getWebauthnUser(h.persister.GetConnection(), userId)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError).SetInternal(fmt.Errorf("failed to get user: %w", err))
+			return echo.NewHTTPError(http.StatusInternalServerError).SetInternal(fmt.Errorf(GetUserFailureMessage, err))
 		}
 		if webauthnUser == nil {
-			err = h.auditLogger.Create(c, models.AuditLogWebAuthnAuthenticationInitFailed, nil, fmt.Errorf("unkown user"))
+			err = h.auditLogger.Create(c, models.AuditLogWebAuthnAuthenticationInitFailed, nil, fmt.Errorf(UnknownUserMessage))
 			if err != nil {
-				return fmt.Errorf("failed to create audit log: %w", err)
+				return fmt.Errorf(CreateAuditLogFailureMessage, err)
 			}
-			return echo.NewHTTPError(http.StatusBadRequest, "user not found")
+			return echo.NewHTTPError(http.StatusBadRequest, UserNotFoundMessage)
 		}
 
 		if len(webauthnUser.WebAuthnCredentials()) > 0 {
 			options, sessionData, err = h.webauthn.BeginLogin(
 				webauthnUser,
-				webauthn.WithUserVerification(protocol.UserVerificationRequirement(h.cfg.Webauthn.UserVerification)),
+				webauthn.WithUserVerification(protocol.UserVerificationRequirement(h.cfg.Passkey.UserVerification)),
 			)
 			if err != nil {
 				return fmt.Errorf("failed to create webauthn assertion options: %w", err)
@@ -267,7 +282,7 @@ func (h *WebauthnHandler) BeginAuthentication(c echo.Context) error {
 	if options == nil && sessionData == nil {
 		var err error
 		options, sessionData, err = h.webauthn.BeginDiscoverableLogin(
-			webauthn.WithUserVerification(protocol.UserVerificationRequirement(h.cfg.Webauthn.UserVerification)),
+			webauthn.WithUserVerification(protocol.UserVerificationRequirement(h.cfg.Passkey.UserVerification)),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create webauthn assertion options for discoverable login: %w", err)
@@ -281,13 +296,13 @@ func (h *WebauthnHandler) BeginAuthentication(c echo.Context) error {
 
 	// Remove all transports, because of a bug in android and windows where the internal authenticator gets triggered,
 	// when the transports array contains the type 'internal' although the credential is not available on the device.
-	for i, _ := range options.Response.AllowedCredentials {
+	for i := range options.Response.AllowedCredentials {
 		options.Response.AllowedCredentials[i].Transport = nil
 	}
 
 	err = h.auditLogger.Create(c, models.AuditLogWebAuthnAuthenticationInitSucceeded, user, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create audit log: %w", err)
+		return fmt.Errorf(CreateAuditLogFailureMessage, err)
 	}
 
 	return c.JSON(http.StatusOK, options)
@@ -314,9 +329,9 @@ func (h *WebauthnHandler) FinishAuthentication(c echo.Context) error {
 		if sessionData == nil {
 			err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnAuthenticationFinalFailed, nil, fmt.Errorf("received unkown challenge"))
 			if err != nil {
-				return fmt.Errorf("failed to create audit log: %w", err)
+				return fmt.Errorf(CreateAuditLogFailureMessage, err)
 			}
-			return echo.NewHTTPError(http.StatusUnauthorized, "Stored challenge and received challenge do not match").SetInternal(errors.New("sessionData not found"))
+			return echo.NewHTTPError(http.StatusUnauthorized, StoredChallengeMismatchMessage).SetInternal(errors.New("sessionData not found"))
 		}
 
 		model := intern.WebauthnSessionDataFromModel(sessionData)
@@ -332,15 +347,15 @@ func (h *WebauthnHandler) FinishAuthentication(c echo.Context) error {
 			}
 			webauthnUser, user, err = h.getWebauthnUser(tx, userId)
 			if err != nil {
-				return fmt.Errorf("failed to get user: %w", err)
+				return fmt.Errorf(GetUserFailureMessage, err)
 			}
 
 			if webauthnUser == nil {
-				err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnAuthenticationFinalFailed, nil, fmt.Errorf("unkown user"))
+				err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnAuthenticationFinalFailed, nil, fmt.Errorf(UnknownUserMessage))
 				if err != nil {
-					return fmt.Errorf("failed to create audit log: %w", err)
+					return fmt.Errorf(CreateAuditLogFailureMessage, err)
 				}
-				return echo.NewHTTPError(http.StatusUnauthorized).SetInternal(errors.New("user not found"))
+				return echo.NewHTTPError(http.StatusUnauthorized).SetInternal(errors.New(UserNotFoundMessage))
 			}
 
 			credential, err = h.webauthn.ValidateDiscoverableLogin(func(rawID, userHandle []byte) (user webauthn.User, err error) {
@@ -349,7 +364,7 @@ func (h *WebauthnHandler) FinishAuthentication(c echo.Context) error {
 			if err != nil {
 				logErr := h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnAuthenticationFinalFailed, user, fmt.Errorf("assertion validation failed"))
 				if logErr != nil {
-					return fmt.Errorf("failed to create audit log: %w", err)
+					return fmt.Errorf(CreateAuditLogFailureMessage, err)
 				}
 				return echo.NewHTTPError(http.StatusUnauthorized, "failed to validate assertion").SetInternal(err)
 			}
@@ -357,20 +372,20 @@ func (h *WebauthnHandler) FinishAuthentication(c echo.Context) error {
 			// non discoverable Login
 			webauthnUser, user, err = h.getWebauthnUser(tx, sessionData.UserId)
 			if err != nil {
-				return fmt.Errorf("failed to get user: %w", err)
+				return fmt.Errorf(GetUserFailureMessage, err)
 			}
 			if webauthnUser == nil {
-				err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnAuthenticationFinalFailed, nil, fmt.Errorf("unkown user"))
+				err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnAuthenticationFinalFailed, nil, fmt.Errorf(UnknownUserMessage))
 				if err != nil {
-					return fmt.Errorf("failed to create audit log: %w", err)
+					return fmt.Errorf(CreateAuditLogFailureMessage, err)
 				}
-				return echo.NewHTTPError(http.StatusUnauthorized).SetInternal(errors.New("user not found"))
+				return echo.NewHTTPError(http.StatusUnauthorized).SetInternal(errors.New(UserNotFoundMessage))
 			}
 			credential, err = h.webauthn.ValidateLogin(webauthnUser, *model, request)
 			if err != nil {
 				logErr := h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnAuthenticationFinalFailed, user, fmt.Errorf("assertion validation failed"))
 				if logErr != nil {
-					return fmt.Errorf("failed to create audit log: %w", err)
+					return fmt.Errorf(CreateAuditLogFailureMessage, err)
 				}
 				return echo.NewHTTPError(http.StatusUnauthorized, "failed to validate assertion").SetInternal(err)
 			}
@@ -403,7 +418,12 @@ func (h *WebauthnHandler) FinishAuthentication(c echo.Context) error {
 			return fmt.Errorf("failed to delete assertion session data: %w", err)
 		}
 
-		token, err := h.sessionManager.GenerateJWT(webauthnUser.UserId)
+		var emailJwt *dto.EmailJwt
+		if e := user.Emails.GetPrimary(); e != nil {
+			emailJwt = dto.JwtFromEmailModel(e)
+		}
+
+		token, _, err := h.sessionManager.GenerateJWT(webauthnUser.UserId, emailJwt)
 		if err != nil {
 			return fmt.Errorf("failed to generate jwt: %w", err)
 		}
@@ -423,7 +443,7 @@ func (h *WebauthnHandler) FinishAuthentication(c echo.Context) error {
 
 		err = h.auditLogger.Create(c, models.AuditLogWebAuthnAuthenticationFinalSucceeded, user, nil)
 		if err != nil {
-			return fmt.Errorf("failed to create audit log: %w", err)
+			return fmt.Errorf(CreateAuditLogFailureMessage, err)
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{"credential_id": base64.RawURLEncoding.EncodeToString(credential.ID), "user_id": webauthnUser.UserId.String()})
@@ -433,17 +453,17 @@ func (h *WebauthnHandler) FinishAuthentication(c echo.Context) error {
 func (h *WebauthnHandler) ListCredentials(c echo.Context) error {
 	sessionToken, ok := c.Get("session").(jwt.Token)
 	if !ok {
-		return errors.New("failed to cast session object")
+		return errors.New(CastSessionFailureMessage)
 	}
 
 	userId, err := uuid.FromString(sessionToken.Subject())
 	if err != nil {
-		return fmt.Errorf("failed to parse subject as uuid: %w", err)
+		return fmt.Errorf(SubjectParseFailureMessage, err)
 	}
 
 	credentials, err := h.persister.GetWebauthnCredentialPersister().GetFromUser(userId)
 	if err != nil {
-		return fmt.Errorf("failed to get webauthn credentials: %w", err)
+		return fmt.Errorf(GetWebauthnCredentialFailureMessage, err)
 	}
 
 	response := make([]*dto.WebauthnCredentialResponse, len(credentials))
@@ -458,12 +478,12 @@ func (h *WebauthnHandler) ListCredentials(c echo.Context) error {
 func (h *WebauthnHandler) UpdateCredential(c echo.Context) error {
 	sessionToken, ok := c.Get("session").(jwt.Token)
 	if !ok {
-		return errors.New("failed to cast session object")
+		return errors.New(CastSessionFailureMessage)
 	}
 
 	userId, err := uuid.FromString(sessionToken.Subject())
 	if err != nil {
-		return fmt.Errorf("failed to parse subject as uuid: %w", err)
+		return fmt.Errorf(SubjectParseFailureMessage, err)
 	}
 
 	credentialID := c.Param("id")
@@ -477,12 +497,12 @@ func (h *WebauthnHandler) UpdateCredential(c echo.Context) error {
 
 	user, err := h.persister.GetUserPersister().Get(userId)
 	if err != nil {
-		return fmt.Errorf("failed to get user: %w", err)
+		return fmt.Errorf(GetUserFailureMessage, err)
 	}
 
 	credential, err := h.persister.GetWebauthnCredentialPersister().Get(credentialID)
 	if err != nil {
-		return fmt.Errorf("failed to get webauthn credentials: %w", err)
+		return fmt.Errorf(GetWebauthnCredentialFailureMessage, err)
 	}
 
 	if credential == nil || credential.UserId.String() != user.ID.String() {
@@ -500,7 +520,7 @@ func (h *WebauthnHandler) UpdateCredential(c echo.Context) error {
 		}
 		err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnCredentialUpdated, user, nil)
 		if err != nil {
-			return fmt.Errorf("failed to create audit log: %w", err)
+			return fmt.Errorf(CreateAuditLogFailureMessage, err)
 		}
 		return nil
 	})
@@ -509,12 +529,12 @@ func (h *WebauthnHandler) UpdateCredential(c echo.Context) error {
 func (h *WebauthnHandler) DeleteCredential(c echo.Context) error {
 	sessionToken, ok := c.Get("session").(jwt.Token)
 	if !ok {
-		return errors.New("failed to cast session object")
+		return errors.New(CastSessionFailureMessage)
 	}
 
 	userId, err := uuid.FromString(sessionToken.Subject())
 	if err != nil {
-		return fmt.Errorf("failed to parse subject as uuid: %w", err)
+		return fmt.Errorf(SubjectParseFailureMessage, err)
 	}
 
 	user, err := h.persister.GetUserPersister().Get(userId)
@@ -541,7 +561,7 @@ func (h *WebauthnHandler) DeleteCredential(c echo.Context) error {
 
 		err = h.auditLogger.CreateWithConnection(tx, c, models.AuditLogWebAuthnCredentialDeleted, user, nil)
 		if err != nil {
-			return fmt.Errorf("failed to create audit log: %w", err)
+			return fmt.Errorf(CreateAuditLogFailureMessage, err)
 		}
 
 		return c.NoContent(http.StatusNoContent)
@@ -551,7 +571,7 @@ func (h *WebauthnHandler) DeleteCredential(c echo.Context) error {
 func (h WebauthnHandler) getWebauthnUser(connection *pop.Connection, userId uuid.UUID) (*intern.WebauthnUser, *models.User, error) {
 	user, err := h.persister.GetUserPersisterWithConnection(connection).Get(userId)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get user: %w", err)
+		return nil, nil, fmt.Errorf(GetUserFailureMessage, err)
 	}
 
 	if user == nil {
@@ -560,7 +580,7 @@ func (h WebauthnHandler) getWebauthnUser(connection *pop.Connection, userId uuid
 
 	credentials, err := h.persister.GetWebauthnCredentialPersisterWithConnection(connection).GetFromUser(user.ID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get webauthn credentials: %w", err)
+		return nil, nil, fmt.Errorf(GetWebauthnCredentialFailureMessage, err)
 	}
 
 	webauthnUser, err := intern.NewWebauthnUser(*user, credentials)

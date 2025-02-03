@@ -1,11 +1,12 @@
 package handler
 
 import (
-	"github.com/teamhanko/hanko/backend/thirdparty"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+
+	"github.com/teamhanko/hanko/backend/thirdparty"
 )
 
 func (s *thirdPartySuite) TestThirdPartyHandler_Auth() {
@@ -48,6 +49,33 @@ func (s *thirdPartySuite) TestThirdPartyHandler_Auth() {
 			expectedBaseURL:     thirdparty.AppleAuthEndpoint,
 		},
 		{
+			name:                "successful redirect to discord",
+			referer:             "https://login.test.example",
+			enabledProviders:    []string{"discord"},
+			allowedRedirectURLs: []string{"https://*.test.example"},
+			requestedProvider:   "discord",
+			requestedRedirectTo: "https://app.test.example",
+			expectedBaseURL:     thirdparty.DiscordOauthAuthEndpoint,
+		},
+		{
+			name:                "successful redirect to microsoft",
+			referer:             "https://login.test.example",
+			enabledProviders:    []string{"microsoft"},
+			allowedRedirectURLs: []string{"https://*.test.example"},
+			requestedProvider:   "microsoft",
+			requestedRedirectTo: "https://app.test.example",
+			expectedBaseURL:     thirdparty.MicrosoftOAuthAuthEndpoint,
+		},
+		{
+			name:                "successful redirect to facebook",
+			referer:             "https://login.test.example",
+			enabledProviders:    []string{"facebook"},
+			allowedRedirectURLs: []string{"https://*.test.example"},
+			requestedProvider:   "facebook",
+			requestedRedirectTo: "https://app.test.example",
+			expectedBaseURL:     thirdparty.FacebookOauthAuthEndpoint,
+		},
+		{
 			name:                     "error redirect on missing provider",
 			referer:                  "https://login.test.example",
 			requestedRedirectTo:      "https://app.test.example",
@@ -82,7 +110,7 @@ func (s *thirdPartySuite) TestThirdPartyHandler_Auth() {
 			requestedRedirectTo:      "https://app.test.example",
 			expectedBaseURL:          "https://login.test.example",
 			expectedError:            thirdparty.ErrorCodeInvalidRequest,
-			expectedErrorDescription: "is not supported",
+			expectedErrorDescription: "unknown provider",
 		},
 		{
 			name:                     "error redirect when requesting a redirectTo that is not allowed",
@@ -102,7 +130,7 @@ func (s *thirdPartySuite) TestThirdPartyHandler_Auth() {
 			requestedRedirectTo:      "https://app.test.example",
 			expectedBaseURL:          "https://error.test.example",
 			expectedError:            thirdparty.ErrorCodeInvalidRequest,
-			expectedErrorDescription: "is not supported",
+			expectedErrorDescription: "unknown provider",
 		},
 	}
 

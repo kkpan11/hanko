@@ -7,11 +7,13 @@ import (
 	auditlog "github.com/teamhanko/hanko/backend/audit_log"
 	"github.com/teamhanko/hanko/backend/config"
 	"github.com/teamhanko/hanko/backend/dto"
+	"github.com/teamhanko/hanko/backend/dto/admin"
 	"github.com/teamhanko/hanko/backend/persistence"
 	"github.com/teamhanko/hanko/backend/persistence/models"
 	"github.com/teamhanko/hanko/backend/session"
 	"github.com/teamhanko/hanko/backend/thirdparty"
 	"github.com/teamhanko/hanko/backend/utils"
+	webhookUtils "github.com/teamhanko/hanko/backend/webhooks/utils"
 	"golang.org/x/oauth2"
 	"net/http"
 	"net/url"
@@ -59,7 +61,7 @@ func (h *ThirdPartyHandler) Auth(c echo.Context) error {
 		return h.redirectError(c, thirdparty.ErrorInvalidRequest(err.Error()).WithCause(err), errorRedirectTo)
 	}
 
-	state, err := thirdparty.GenerateState(h.cfg, provider.Name(), request.RedirectTo)
+	state, err := thirdparty.GenerateState(h.cfg, provider.ID(), request.RedirectTo)
 	if err != nil {
 		return h.redirectError(c, thirdparty.ErrorServer("could not generate state").WithCause(err), errorRedirectTo)
 	}
@@ -141,13 +143,20 @@ func (h *ThirdPartyHandler) Callback(c echo.Context) error {
 			return thirdparty.ErrorInvalidRequest("could not retrieve user data from provider").WithCause(terr)
 		}
 
-		linkingResult, terr := thirdparty.LinkAccount(tx, h.cfg, h.persister, userData, provider.Name())
+		linkingResult, terr := thirdparty.LinkAccount(tx, h.cfg, h.persister, userData, provider.ID(), false, nil, state.IsFlow)
 		if terr != nil {
 			return terr
 		}
 		accountLinkingResult = linkingResult
 
-		token, terr := models.NewToken(linkingResult.User.ID)
+		emailModel := linkingResult.User.Emails.GetEmailByAddress(userData.Metadata.Email)
+		identityModel := emailModel.Identities.GetIdentity(provider.ID(), userData.Metadata.Subject)
+
+		token, terr := models.NewToken(
+			linkingResult.User.ID,
+			models.TokenForFlowAPI(state.IsFlow),
+			models.TokenWithIdentityID(identityModel.ID),
+			models.TokenUserCreated(linkingResult.UserCreated))
 		if terr != nil {
 			return thirdparty.ErrorServer("could not create token").WithCause(terr)
 		}
@@ -189,6 +198,13 @@ func (h *ThirdPartyHandler) Callback(c echo.Context) error {
 
 	if err != nil {
 		return h.redirectError(c, thirdparty.ErrorServer("could not create audit log").WithCause(err), h.cfg.ThirdParty.ErrorRedirectURL)
+	}
+
+	if accountLinkingResult.WebhookEvent != nil {
+		err = webhookUtils.TriggerWebhooks(c, h.persister.GetConnection(), *accountLinkingResult.WebhookEvent, admin.FromUserModel(*accountLinkingResult.User))
+		if err != nil {
+			c.Logger().Warn(err)
+		}
 	}
 
 	return c.Redirect(http.StatusTemporaryRedirect, successRedirectTo.String())

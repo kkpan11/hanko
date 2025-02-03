@@ -3,11 +3,14 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/suite"
 	"github.com/teamhanko/hanko/backend/config"
+	"github.com/teamhanko/hanko/backend/crypto/jwk"
 	"github.com/teamhanko/hanko/backend/dto"
 	"github.com/teamhanko/hanko/backend/persistence/models"
+	"github.com/teamhanko/hanko/backend/session"
 	"github.com/teamhanko/hanko/backend/test"
 	"golang.org/x/crypto/bcrypt"
 	"net/http"
@@ -35,12 +38,12 @@ func (s *passcodeSuite) TestPasscodeHandler_Init() {
 
 	cfg := func() *config.Config {
 		cfg := &test.DefaultConfig
-		cfg.Passcode.Smtp.Host = "localhost"
-		cfg.Passcode.Smtp.Port = s.EmailServer.SmtpPort
+		cfg.EmailDelivery.SMTP.Host = s.EmailServer.SmtpHost
+		cfg.EmailDelivery.SMTP.Port = s.EmailServer.SmtpPort
 		return cfg
 	}
 
-	e := NewPublicRouter(cfg(), s.Storage, nil)
+	e := NewPublicRouter(cfg(), s.Storage, nil, nil)
 
 	emailId := "51b7c175-ceb6-45ba-aae6-0092221c1b84"
 	unknownEmailId := "83618f24-2db8-4ea2-b370-ac8335f782d8"
@@ -119,10 +122,12 @@ func (s *passcodeSuite) TestPasscodeHandler_Finish() {
 
 	hashedPasscode, err := bcrypt.GenerateFromPassword([]byte("123456"), 12)
 
+	userId := uuid.FromStringOrNil("b5dd5267-b462-48be-b70d-bcd6f1bbe7a5")
+	emailId := uuid.FromStringOrNil("51b7c175-ceb6-45ba-aae6-0092221c1b84")
 	passcode := models.Passcode{
 		ID:        uuid.FromStringOrNil("a2383922-dea3-46c8-be17-85b267c0d135"),
-		UserId:    uuid.FromStringOrNil("b5dd5267-b462-48be-b70d-bcd6f1bbe7a5"),
-		EmailID:   uuid.FromStringOrNil("51b7c175-ceb6-45ba-aae6-0092221c1b84"),
+		UserId:    &userId,
+		EmailID:   &emailId,
 		Ttl:       300,
 		Code:      string(hashedPasscode),
 		TryCount:  0,
@@ -132,12 +137,24 @@ func (s *passcodeSuite) TestPasscodeHandler_Finish() {
 
 	passcodeWithExpiredTimeout := models.Passcode{
 		ID:        uuid.FromStringOrNil("a2383922-dea3-46c8-be17-85b267c0d135"),
-		UserId:    uuid.FromStringOrNil("b5dd5267-b462-48be-b70d-bcd6f1bbe7a5"),
-		EmailID:   uuid.FromStringOrNil("51b7c175-ceb6-45ba-aae6-0092221c1b84"),
+		UserId:    &userId,
+		EmailID:   &emailId,
 		Ttl:       300,
 		Code:      string(hashedPasscode),
 		TryCount:  0,
 		CreatedAt: now.Add(-500 * time.Second),
+		UpdatedAt: now,
+	}
+
+	emailIdNotAssigned := uuid.FromStringOrNil("7c4473b8-ddcc-480b-b01f-df89e99f74c9")
+	passcodeForNonAssignedEmail := models.Passcode{
+		ID:        uuid.FromStringOrNil("494129d5-76de-4fae-b07d-f2a521e1804d"),
+		UserId:    &userId,
+		EmailID:   &emailIdNotAssigned,
+		Ttl:       300,
+		Code:      string(hashedPasscode),
+		TryCount:  0,
+		CreatedAt: now,
 		UpdatedAt: now,
 	}
 
@@ -146,13 +163,16 @@ func (s *passcodeSuite) TestPasscodeHandler_Finish() {
 	}
 
 	tests := []struct {
-		name               string
-		passcodeId         string
-		retryCount         int
-		passcode           models.Passcode
-		code               string
-		expectedStatusCode int
-		cfg                func() *config.Config
+		name                         string
+		passcodeId                   string
+		retryCount                   int
+		passcode                     models.Passcode
+		code                         string
+		expectedStatusCode           int
+		cfg                          func() *config.Config
+		userId                       string
+		sendSessionTokenInCookie     bool
+		sendSessionTokenInAuthHeader bool
 	}{
 		{
 			name:               "finish successful",
@@ -207,14 +227,64 @@ func (s *passcodeSuite) TestPasscodeHandler_Finish() {
 			expectedStatusCode: http.StatusRequestTimeout,
 			cfg:                cfg,
 		},
+		{
+			name:                     "create email with session in cookie",
+			passcodeId:               "494129d5-76de-4fae-b07d-f2a521e1804d",
+			passcode:                 passcodeForNonAssignedEmail,
+			code:                     "123456",
+			expectedStatusCode:       http.StatusOK,
+			cfg:                      cfg,
+			userId:                   "b5dd5267-b462-48be-b70d-bcd6f1bbe7a5",
+			sendSessionTokenInCookie: true,
+		},
+		{
+			name:                     "do not create email with wrong session in cookie",
+			passcodeId:               "494129d5-76de-4fae-b07d-f2a521e1804d",
+			passcode:                 passcodeForNonAssignedEmail,
+			code:                     "123456",
+			expectedStatusCode:       http.StatusForbidden,
+			cfg:                      cfg,
+			userId:                   "851842a9-db50-49b5-aa00-1c447c31d819",
+			sendSessionTokenInCookie: true,
+		},
+		{
+			name:                         "create email with session in Authorization header",
+			passcodeId:                   "494129d5-76de-4fae-b07d-f2a521e1804d",
+			passcode:                     passcodeForNonAssignedEmail,
+			code:                         "123456",
+			expectedStatusCode:           http.StatusOK,
+			cfg:                          cfg,
+			userId:                       "b5dd5267-b462-48be-b70d-bcd6f1bbe7a5",
+			sendSessionTokenInAuthHeader: true,
+		},
+		{
+			name:                         "do not create email with wrong session in Authorization header",
+			passcodeId:                   "494129d5-76de-4fae-b07d-f2a521e1804d",
+			passcode:                     passcodeForNonAssignedEmail,
+			code:                         "123456",
+			expectedStatusCode:           http.StatusForbidden,
+			cfg:                          cfg,
+			userId:                       "851842a9-db50-49b5-aa00-1c447c31d819",
+			sendSessionTokenInAuthHeader: true,
+		},
 	}
 
 	for _, currentTest := range tests {
 		s.Run(currentTest.name, func() {
-			e := NewPublicRouter(currentTest.cfg(), s.Storage, nil)
+			s.SetupTest()
+
+			err := s.LoadFixtures("../test/fixtures/passcode")
+			s.Require().NoError(err)
+
+			jwkManager, err := jwk.NewDefaultManager(test.DefaultConfig.Secrets.Keys, s.Storage.GetJwkPersister())
+			s.Require().NoError(err)
+			sessionManager, err := session.NewManager(jwkManager, test.DefaultConfig)
+			s.Require().NoError(err)
+
+			e := NewPublicRouter(currentTest.cfg(), s.Storage, nil, nil)
 
 			// Setup passcode
-			err := s.Storage.GetPasscodePersister().Create(currentTest.passcode)
+			err = s.Storage.GetPasscodePersister().Create(currentTest.passcode)
 			s.Require().NoError(err)
 
 			body := dto.PasscodeFinishRequest{
@@ -230,6 +300,20 @@ func (s *passcodeSuite) TestPasscodeHandler_Finish() {
 			for i := 0; i <= currentTest.retryCount; i++ {
 				req := httptest.NewRequest(http.MethodPost, "/passcode/login/finalize", bytes.NewReader(bodyJson))
 				req.Header.Set("Content-Type", "application/json")
+				if currentTest.sendSessionTokenInAuthHeader {
+					sessionToken, _, err := sessionManager.GenerateJWT(uuid.FromStringOrNil(currentTest.userId), nil)
+					s.Require().NoError(err)
+					req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", sessionToken))
+				}
+
+				if currentTest.sendSessionTokenInCookie {
+					sessionToken, _, err := sessionManager.GenerateJWT(uuid.FromStringOrNil(currentTest.userId), nil)
+					s.Require().NoError(err)
+
+					sessionCookie, err := sessionManager.GenerateCookie(sessionToken)
+					s.Require().NoError(err)
+					req.AddCookie(sessionCookie)
+				}
 				rec := httptest.NewRecorder()
 
 				e.ServeHTTP(rec, req)
@@ -249,6 +333,7 @@ func (s *passcodeSuite) TestPasscodeHandler_Finish() {
 
 			// remove passcode
 			_ = s.Storage.GetPasscodePersister().Delete(currentTest.passcode)
+			s.TearDownTest()
 		})
 	}
 }

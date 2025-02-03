@@ -74,7 +74,7 @@ pnpm install @teamhanko/hanko-elements
 
 To integrate Hanko, you need to import and call the `register()` function from the `hanko-elements` module. Once this is
 done, you can use the web components in your HTML code. For a functioning page, at least the `<hanko-auth>` element
-should be placed, so the users can sign in, and also, a handler for the "onAuthFlowCompleted" event should be added, to
+should be placed, so the users can sign in, and also, a handler for the "onSessionCreated" event should be added, to
 customize the behaviour after the authentication flow has been completed (e.g. redirect to another page). These steps
 will be described in the following sections.
 
@@ -122,6 +122,9 @@ const defaultOptions = {
   translationsLocation: "/i18n",   // The URL or path where the translation files are located.
   fallbackLanguage: "en",          // The fallback language to be used if a translation is not available.
   storageKey: "hanko",             // The name of the cookie the session token is stored in and the prefix / name of local storage keys
+  cookieDomain: undefined,         // The domain where the cookie set from the SDK is available. When undefined,
+                                   // defaults to the domain of the page where the cookie was created.
+  cookieSameSite: "lax",           // Specify whether/when cookies are sent with cross-site requests.
 };
 
 const { hanko } = await register(
@@ -146,7 +149,7 @@ of your HTML. A minimal example would look like this:
   await register("https://hanko.yourdomain.com");
 
   const authComponent = document.getElementById("authComponent");
-  authComponent.addEventListener("onAuthFlowCompleted", () => {
+  authComponent.addEventListener("onSessionCreated", () => {
     // redirect to a different page
   });
 </script>
@@ -154,19 +157,37 @@ of your HTML. A minimal example would look like this:
 
 The individual web component are described in the following sections.
 
-#### &lt;hanko-auth&gt;
+#### &lt;hanko-auth&gt;, &lt;hanko-login&gt; and &lt;hanko-registration&gt;
 
-A web component that handles user login and user registration.
+These three web components offer a user-friendly interface for user login or registration. The difference between
+the components is, that `<hanko-auth>` has the ability to switch between the login and
+registration UI, whereas `<hanko-login>` is dedicated to the login and `<hanko-registration>`
+to the registration only.
 
 ##### Markup
+
+Combined UI for login and registration:
 
 ```html
 <hanko-auth></hanko-auth>
 ```
 
+Dedicated UI for the login:
+
+```html
+<hanko-login></hanko-login>
+```
+
+Dedicated UI for the registration:
+
+```html
+<hanko-registration></hanko-registration>
+```
+
 ##### Attributes
 
 - `prefilled-email` Used to prefill the email input field.
+- `prefilled-username` Used to prefill the username input field.
 - `lang` Used to specify the language of the content within the element. See [Translations](#translations).
 - `experimental` A space-separated list of experimental features to be enabled.
   See [experimental features](#experimental-features).
@@ -198,7 +219,7 @@ handler via the `frontend-sdk` (see next section).
 <script>
   document
     .getElementById("events")
-    .addEventListener("onAuthFlowCompleted", console.log);
+    .addEventListener("onSessionCreated", console.log);
   // more events are available (see "frontend-sdk" docs)...
 </script>
 ```
@@ -222,31 +243,17 @@ const hanko = new Hanko("https://hanko.yourdomain.com");
 It is possible to bind callbacks to different custom events in use of the SDKs event listener functions.
 The callback function will be called when the event happens and an object will be passed in, containing event details.
 
-##### Auth Flow Completed
-
-Will be triggered after a session has been created and the user has completed possible
-additional steps (e.g. passkey registration or password recovery) via the `<hanko-auth>` element.
-
-```js
-hanko.onAuthFlowCompleted((authFlowCompletedDetail) => {
-  // Login, registration or recovery has been completed successfully. You can now take control and redirect the
-  // user to protected pages.
-  console.info(
-    `User successfully completed the registration or authorization process (user-id: "${authFlowCompletedDetail.userID}")`
-  );
-});
-```
-
 ##### Session Created
 
-Will be triggered before the "hanko-auth-flow-completed" happens, as soon as the user is technically logged in. It will
-also be triggered when the user logs in via another browser window. The event can be used to obtain the JWT.
+Will be triggered after a session has been created and the user has completed possible additional steps (e.g. passkey
+registration or password recovery). It will also be triggered when the user logs in via another browser window. The
+event can be used to obtain the JWT.
 
 Please note, that the JWT is only available, when the Hanko-API configuration allows to obtain the JWT. When using
 Hanko-Cloud the JWT is always present, for self-hosted Hanko-APIs you can restrict the cookie to be readable by the
 backend only, as long as your backend runs under the same domain as your frontend. To do so, make sure the config
 parameter "session.enable_auth_token_header" is turned off via the
-[Hanko-API configuration](https://github.com/teamhanko/hanko/blob/main/backend/docs/Config.md). If you want the JWT to
+[Hanko-API configuration](https://github.com/teamhanko/hanko/wiki). If you want the JWT to
 be contained in the event details, you need to turn on "session.enable_auth_token_header" when using a cross-domain
 setup. When it's a same-domain setup you need to turn off "session.cookie.http_only" to make the JWT accessible to the
 frontend.
@@ -255,7 +262,7 @@ frontend.
 hanko.onSessionCreated((sessionDetail) => {
   // A new JWT has been issued.
   console.info(
-    `Session created or updated (user-id: "${sessionDetail.userID}", jwt: ${sessionDetail.jwt})`
+    `Session created or updated (jwt: ${sessionDetail.jwt})`
   );
 });
 ```
@@ -336,7 +343,7 @@ await hanko.user.logout();
 ```
 
 To learn how error handling works and what else you can do with SDK, take a look into
-the [frontend-sdk docs](https://docs.hanko.io/jsdoc/hanko-frontend-sdk/).
+the [frontend-sdk docs](https://teamhanko.github.io/hanko/jsdoc/hanko-frontend-sdk/).
 
 ## UI Customization
 
@@ -441,7 +448,7 @@ The following parts are available:
 - `divider-line` - the line before and after the `divider-text`
 - `form-item` - the container of a form item, e.g. an input field or a button
 
-#### Examples
+#### Using shadow parts
 
 The following examples demonstrate how to apply styles to specific shadow parts:
 
@@ -571,6 +578,7 @@ Translations are currently available for the following languages:
 - "de" - German
 - "en" - English
 - "fr" - French
+- "it" - Italian
 - "ptBR" - Brazilian Portuguese
 - "zh" - Simplified Chinese
 
@@ -598,7 +606,7 @@ import { all } from "@teamhanko/hanko-elements/i18n/all";
 After importing, provide the translations through the `register()` function:
 
 ```typescript
-register("https://hanko.yourdomain.com", { translations: { bn, de, en, fr, ptBR, zh } });
+register("https://hanko.yourdomain.com", { translations: { bn, de, en, fr, it, ptBR, zh } });
 
 // or
 
@@ -699,6 +707,13 @@ Markup:
 <hanko-auth lang="symbols"></hanko-auth>
 ```
 
+### Translation of outgoing Hanko emails
+
+If you use Hanko Elements the language supplied to the `lang` attribute of any of the components is also used to convey
+to the Hanko API the language to use for outgoing emails. If you have disabled email delivery through Hanko and
+configured a webhook for the `email.send` event, the value for the `lang` attribute is reflected in the JWT payload of
+the token contained in the webhook request in the `language` claim.
+
 ## Experimental Features
 
 ### Conditional Mediation / Autofill assisted Requests
@@ -740,7 +755,7 @@ To learn more about how to integrate the Hanko elements into frontend frameworks
 ## Exports
 
 The `@teamhanko/hanko-elements` package exports the functions and interfaces listed below and additionally every
-declaration provided by the [frontend-sdk](https://docs.hanko.io/jsdoc/hanko-frontend-sdk/).
+declaration provided by the [frontend-sdk](https://teamhanko.github.io/hanko/jsdoc/hanko-frontend-sdk/).
 
 ### Functions
 

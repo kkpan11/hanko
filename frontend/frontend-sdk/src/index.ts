@@ -6,26 +6,20 @@ export { Hanko };
 
 // Clients
 
-import { ConfigClient } from "./lib/client/ConfigClient";
-import { PasscodeClient } from "./lib/client/PasscodeClient";
-import { PasswordClient } from "./lib/client/PasswordClient";
 import { UserClient } from "./lib/client/UserClient";
-import { WebauthnClient } from "./lib/client/WebauthnClient";
 import { EmailClient } from "./lib/client/EmailClient";
 import { ThirdPartyClient } from "./lib/client/ThirdPartyClient";
 import { TokenClient } from "./lib/client/TokenClient";
 import { EnterpriseClient } from "./lib/client/EnterpriseClient";
+import { SessionClient } from "./lib/client/SessionClient";
 
 export {
-  ConfigClient,
   UserClient,
-  WebauthnClient,
-  PasswordClient,
-  PasscodeClient,
   EmailClient,
   ThirdPartyClient,
   TokenClient,
   EnterpriseClient,
+  SessionClient,
 };
 
 // Utils
@@ -56,6 +50,7 @@ import {
   WebauthnCredential,
   WebauthnCredentials,
   Identity,
+  SessionCheckResponse,
 } from "./lib/Dto";
 
 export type {
@@ -78,6 +73,7 @@ export type {
   WebauthnCredential,
   WebauthnCredentials,
   Identity,
+  SessionCheckResponse,
 };
 
 // Errors
@@ -129,21 +125,24 @@ export {
 import {
   CustomEventWithDetail,
   SessionDetail,
-  AuthFlowCompletedDetail,
-  authFlowCompletedType,
   sessionCreatedType,
   sessionExpiredType,
   userLoggedOutType,
   userDeletedType,
 } from "./lib/events/CustomEvents";
 
-export type { SessionDetail, AuthFlowCompletedDetail };
+export type { SessionDetail };
 
 export {
-  authFlowCompletedType,
   sessionCreatedType,
   sessionExpiredType,
   userLoggedOutType,
   userDeletedType,
   CustomEventWithDetail,
 };
+
+// Misc
+
+import { CookieSameSite } from "./lib/Cookie";
+
+export type { CookieSameSite };
